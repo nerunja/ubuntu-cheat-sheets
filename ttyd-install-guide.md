@@ -92,6 +92,43 @@ sudo certbot --nginx -d terminal.yourdomain.com
 
 Since you're on Dynu, use your Dynu DDNS hostname (or a subdomain CNAME'd to it) as `server_name` and for the certbot `-d` flag.
 
+### If nginx on this VPS already runs somewhere else (e.g. in Docker) or you're adding ttyd as a subpath instead of a new subdomain
+
+The steps above assume a fresh, host-installed nginx and a dedicated subdomain
+(`terminal.yourdomain.com`). If this VPS already has nginx running — especially
+if it's a **Docker container** fronting other sites — and you're bolting ttyd
+onto an **existing domain as a subpath** (e.g. `https://yourdomain.com/terminal/`),
+several things behave differently and are easy to get wrong:
+
+- **`-i 127.0.0.1` won't work if nginx is in Docker.** A container reaching the
+  host via the `host-gateway` special hostname connects through the Docker
+  bridge IP (e.g. `172.17.0.1`), not loopback. A ttyd bound to `127.0.0.1` will
+  refuse that connection even though `curl http://127.0.0.1:7681` succeeds
+  directly on the host — nginx will just log `connect() failed (111: Connection
+  refused)` and return 502. Bind to `-i 0.0.0.0` instead, and rely on the
+  firewall (not the bind address) to keep port 7681 private — see Section 5.
+- **Subpath deployments need `-b/--base-path`.** Add `-b /terminal` (or
+  whatever path you're mounting ttyd at) to `ExecStart` — otherwise ttyd's
+  websocket/asset URLs resolve to the domain root and silently hit the wrong
+  nginx location.
+- **`proxy_pass` must NOT strip the subpath when `-b` is set.** With `-b
+  /terminal`, ttyd only answers requests that still carry the `/terminal`
+  prefix. A `proxy_pass http://127.0.0.1:7681/;` (trailing slash) strips the
+  matched location prefix before forwarding — use `proxy_pass
+  http://127.0.0.1:7681;` (no trailing slash/URI) so the original path passes
+  through unchanged.
+- **If nginx's config is a single-file Docker bind mount, `nginx -s reload`
+  can silently no-op after `git pull`.** `git pull` swaps the file's inode;
+  a single-file bind mount can keep pointing at the old one. Use `docker
+  restart <container>` instead of a reload after pulling config changes.
+
+If you're adding this to a VPS that already has nginx configured (as opposed
+to setting up nginx fresh per this guide), see the README in the
+`remote-desktop-broker` workspace (`../remote-desktop-broker/README.md`) and
+`guac-on-home/vps/TTYD-SETUP.md` in that repo for a complete, live-debugged
+worked example against a Dockerized nginx — including the exact failure modes
+above as they actually happened.
+
 ## 5. Firewall
 
 ```bash
@@ -136,3 +173,6 @@ You should see ttyd sitting at a few MB — a night-and-day difference versus th
 | WebSocket fails / terminal doesn't respond after connecting | Missing `Upgrade`/`Connection` headers in the nginx config — double check the block above |
 | Login prompt appears but typing does nothing | Forgot `-W` flag — ttyd defaults to read-only |
 | Works over HTTP but breaks after adding certbot | Certbot may have created a duplicate `listen 443` block — check `nginx -t` output and `/etc/nginx/sites-enabled/ttyd` for conflicts |
+| 502 Bad Gateway, but ttyd is running and `curl 127.0.0.1:7681` works fine on the host | nginx is in Docker and ttyd is bound to `127.0.0.1` — not reachable via `host-gateway`. Bind `-i 0.0.0.0` instead (see the Docker-nginx subsection above) |
+| 502 Bad Gateway on a subpath deployment (e.g. `/terminal/`), ttyd otherwise healthy | `proxy_pass` is stripping the subpath while ttyd (with `-b`) expects to see it — drop the trailing slash on `proxy_pass` |
+| Terminal loads but assets 404 / websocket connects to the wrong path | Missing `-b /yourpath` on `ExecStart` for a subpath deployment |
