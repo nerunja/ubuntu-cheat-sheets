@@ -176,3 +176,5 @@ You should see ttyd sitting at a few MB — a night-and-day difference versus th
 | 502 Bad Gateway, but ttyd is running and `curl 127.0.0.1:7681` works fine on the host | nginx is in Docker and ttyd is bound to `127.0.0.1` — not reachable via `host-gateway`. Bind `-i 0.0.0.0` instead (see the Docker-nginx subsection above) |
 | 502 Bad Gateway on a subpath deployment (e.g. `/terminal/`), ttyd otherwise healthy | `proxy_pass` is stripping the subpath while ttyd (with `-b`) expects to see it — drop the trailing slash on `proxy_pass` |
 | Terminal loads but assets 404 / websocket connects to the wrong path | Missing `-b /yourpath` on `ExecStart` for a subpath deployment |
+| Certbot fails with Cloudflare IPv6 address in error (e.g. `2606:4700:...`) | Domain has Cloudflare proxy enabled (orange cloud) OR AAAA record still points to Cloudflare IPv6 — disable proxy or delete AAAA record |
+| Certbot HTTP-01 challenge fails with "unauthorized" on Cloudflare-proxied domain | Cloudflare proxy intercepts `.well-known/acme-challenge/` path — disable orange cloud temporarily, run certbot, then re-enable |
