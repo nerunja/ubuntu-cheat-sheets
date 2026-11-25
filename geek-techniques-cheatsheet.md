@@ -44,6 +44,13 @@ New techniques are appended at the end.
 | 33 | nginx | [Rate limiting with limit_req](#33-rate-limiting-with-limit_req) |
 | 34 | debugging | [Find what crashed a server with journalctl](#34-find-what-crashed-a-server-with-journalctl) |
 | 35 | git | [Fix an older commit with --fixup + --autosquash](#35-fix-an-older-commit-with---fixup----autosquash) |
+| 36 | docker | [Compose healthcheck + depends_on: service_healthy](#36-compose-healthcheck--depends_on-service_healthy) |
+| 37 | linux | [chattr +i / +a: immutable and append-only files](#37-chattr-i--a-immutable-and-append-only-files) |
+| 38 | ssh | [ssh -D: dynamic SOCKS proxy](#38-ssh--d-dynamic-socks-proxy) |
+| 39 | shell | [Bash strict mode + trap](#39-bash-strict-mode--trap) |
+| 40 | networking | [Live remote packet capture into local Wireshark](#40-live-remote-packet-capture-into-local-wireshark) |
+| 41 | nginx | [nginx auth_request: one login check in front of any app](#41-nginx-auth_request-one-login-check-in-front-of-any-app) |
+| 42 | debugging | [eBPF one-shot tools (bcc / bpftrace)](#42-ebpf-one-shot-tools-bcc--bpftrace) |
 
 ---
 
@@ -535,3 +542,137 @@ git commit --fixup=reword:<sha>           # change only the message, no code
 ```
 
 Only for commits you have not pushed (or on your own branch): it rewrites history.
+
+---
+
+## 36. Compose healthcheck + depends_on: service_healthy
+
+`depends_on` alone only waits for the container to *start*, not to be *ready*. Add a healthcheck and wait on it.
+
+```yaml
+services:
+  db:
+    image: postgres:16
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+  app:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy     # also: service_started, service_completed_successfully
+```
+
+```bash
+docker compose ps                                  # shows (healthy) / (unhealthy)
+docker inspect --format '{{json .State.Health}}' <container> | jq
+```
+
+---
+
+## 37. chattr +i / +a: immutable and append-only files
+
+File attributes that even root can't bypass without removing them first.
+
+```bash
+sudo chattr +i /etc/resolv.conf        # immutable: no edit, delete, rename, or link
+sudo chattr +a /var/log/audit.log      # append-only: >> works, > and rm fail
+lsattr /etc/resolv.conf                # ----i---------e------- /etc/resolv.conf
+sudo chattr -i /etc/resolv.conf        # remove it again
+```
+
+> Classic use: stop NetworkManager/DHCP from overwriting `/etc/resolv.conf`. If `rm` says "Operation not permitted" as root, check `lsattr`.
+
+---
+
+## 38. ssh -D: dynamic SOCKS proxy
+
+Turn any SSH server into a SOCKS5 proxy into its network.
+
+```bash
+ssh -N -D 1080 user@jumphost
+curl --socks5-hostname localhost:1080 http://intranet.local/   # DNS resolved remotely too
+```
+
+Browser: set SOCKS5 proxy `localhost:1080` (and "proxy DNS when using SOCKS v5").
+
+```sshconfig
+Host work-proxy
+    HostName jumphost
+    DynamicForward 1080
+```
+
+---
+
+## 39. Bash strict mode + trap
+
+```bash
+#!/usr/bin/env bash
+set -Eeuo pipefail          # exit on error, unset vars, failed pipes; -E passes ERR trap into functions
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT                                           # always clean up
+trap 'echo "error on line $LINENO: $BASH_COMMAND" >&2' ERR          # say where it died
+```
+
+> Allow an expected failure explicitly: `grep foo file || true`.
+
+---
+
+## 40. Live remote packet capture into local Wireshark
+
+Capture on a server, watch live in Wireshark on your laptop, no pcap file copying.
+
+```bash
+ssh user@server 'sudo tcpdump -i eth0 -U -s0 -w - not port 22' | wireshark -k -i -
+```
+
+`-U` flushes each packet, `-w -` writes pcap to stdout, `not port 22` skips your own SSH traffic. Needs passwordless sudo for tcpdump (or capabilities on it).
+
+---
+
+## 41. nginx auth_request: one login check in front of any app
+
+nginx sends a subrequest to an auth service; 2xx lets the request through, 401/403 blocks it.
+
+```nginx
+location / {
+    auth_request /_auth;
+    auth_request_set $user $upstream_http_x_user;
+    proxy_set_header X-User $user;
+    proxy_pass http://app;
+}
+
+location = /_auth {
+    internal;
+    proxy_pass http://auth-service/verify;
+    proxy_pass_request_body off;
+    proxy_set_header Content-Length "";
+    proxy_set_header X-Original-URI $request_uri;
+}
+
+error_page 401 = @login;
+location @login { return 302 /login?rd=$request_uri; }
+```
+
+> This is how oauth2-proxy / Authelia sit in front of apps that have no login of their own.
+
+---
+
+## 42. eBPF one-shot tools (bcc / bpftrace)
+
+See system-wide activity live with near-zero overhead.
+
+```bash
+sudo apt install bpfcc-tools bpftrace     # tools are named *-bpfcc on Ubuntu
+
+sudo execsnoop-bpfcc            # every new process, with args (catches short-lived ones)
+sudo opensnoop-bpfcc -p <PID>   # files being opened
+sudo tcpconnect-bpfcc           # outbound TCP connections, by process
+sudo biolatency-bpfcc           # disk I/O latency histogram
+
+sudo bpftrace -e 'tracepoint:syscalls:sys_enter_openat { printf("%s %s\n", comm, str(args->filename)); }'
+```
